@@ -59,38 +59,44 @@ def nodo_coordinador(estado: EstadoAgente) -> dict:
 - atencion_cliente: consultas de CLIENTES EXTERNOS sobre Industria de
   Alimentos el Maná. Incluye saludos, conversación casual, sedes,
   direcciones, horarios, contacto, misión, visión, productos, precios,
-  menú, disponibilidad, tortas, panes, bebidas y combos. Categoría por
+  menú, disponibilidad, tortas, panes, bebidas y descuentos. Categoría por
   DEFECTO si dudas entre esta y otra.
 
 - documentos: consultas INTERNAS / DE EMPLEADOS que requieren buscar en
-  los documentos internos de la empresa: política comercial interna,
-  protocolo de atención al cliente, informe de RRHH (rotación,
-  indicadores, clima laboral) y plan estratégico.
+  los documentos internos: política comercial, protocolo de atención,
+  informe de RRHH y plan estratégico. TAMBIÉN incluye consultas FACTUALES
+  de ventas (totales por sede/producto/mes, montos específicos, "cuánto
+  se vendió", "ventas de X") que se responden con un dato directo.
 
 - reporte: el usuario pide explícitamente un reporte, informe ejecutivo,
   resumen estructurado, o un "reporte de ventas".
 
-- analisis: el usuario pide analizar, comparar, investigar o evaluar
-  información de la empresa en profundidad.
+- analisis: el usuario pide un análisis EN PROFUNDIDAD que requiera
+  comparación, evaluación o conclusiones (ej. "compara las ventas por
+  sede y saca conclusiones", "evalúa el desempeño del equipo de ventas").
 
 Responde SOLO con la categoría, en minúsculas, sin explicación ni puntuación.
 
 Ejemplos:
 "Hola, ¿cómo estás?" -> atencion_cliente
 "¿Cuál es la dirección de la sede de Bucaramanga?" -> atencion_cliente
-"¿Cuánto vale la torta americana?" -> atencion_cliente
+"¿Cuánto vale la torta envinada?" -> atencion_cliente
 "¿Qué horarios tienen los domingos?" -> atencion_cliente
 "¿Cuál es la misión de la empresa?" -> atencion_cliente
 "¿Tienen torta red velvet?" -> atencion_cliente
 "¿Cuánto es 45 * 12?" -> atencion_cliente
+"Ventas totales de Cabecera" -> documentos
+"¿Cuánto vendió Bucaramanga?" -> documentos
+"¿Cuál fue el producto más vendido?" -> documentos
+"¿Cuánto se vendió en mayo?" -> documentos
 "¿Cuál es el protocolo de atención al cliente?" -> documentos
 "¿Cómo va la rotación de personal este trimestre?" -> documentos
 "¿Qué dice la política comercial interna?" -> documentos
 "¿Cuál es el plan estratégico 2025?" -> documentos
 "Genera un reporte ejecutivo de ventas" -> reporte
 "Necesito un informe ejecutivo de RRHH" -> reporte
-"Analiza el desempeño de ventas por región" -> analisis
-"Compara las ventas de Bogotá y Medellín y saca conclusiones" -> analisis"""
+"Analiza el desempeño de ventas por región y saca conclusiones" -> analisis
+"Compara las ventas del Centro y Cabecera y saca conclusiones" -> analisis"""
 
     resp = llm.invoke([
         SystemMessage(content=instrucciones),
@@ -99,7 +105,10 @@ Ejemplos:
     contenido = limpiar_pensamiento(resp.content).lower()
 
     categoria = "atencion_cliente"
-    for opcion in ("atencion_cliente", "documentos", "reporte", "analisis"):
+    # OJO: chequear "analisis" ANTES que "documentos" no es necesario aquí,
+    # pero el orden importa si una palabra contiene a otra. Dejamos el orden
+    # del más específico al más genérico.
+    for opcion in ("analisis", "reporte", "documentos", "atencion_cliente"):
         if opcion in contenido:
             categoria = opcion
             break
@@ -155,34 +164,64 @@ Responde en español, claro y profesional."""),
 # ═══════════════════════════════════════════════════════════
 def nodo_analisis(estado: EstadoAgente) -> dict:
     print("  🔍 [INVESTIGADOR] Recopilando información...")
-    agente_investigador = create_agent(
-        model=crear_llm(temperature=0.3),
-        tools=[buscar_documentos, analizar_ventas],
-        system_prompt="""Eres un investigador de Industria de Alimentos el
-Mana. Usa tus herramientas para recopilar datos reales relevantes a la
-pregunta ANTES de concluir nada. Sé concreto. Responde en español, en lista
-de puntos clave.""",
-    )
-    investigacion = limpiar_pensamiento(agente_investigador.invoke({
-        "messages": [HumanMessage(content=f"Investiga sobre: {estado['entrada_usuario']}")]
-    })["messages"][-1].content)
+    pregunta = estado["entrada_usuario"]
+
+    # ── Pre-cómputo de herramientas (sin depender de tool calling) ──
+    try:
+        docs_ctx = buscar_documentos.invoke({"pregunta": pregunta})
+    except Exception as e:
+        docs_ctx = f"(no se pudo consultar documentos: {e})"
+
+    try:
+        ventas_region = analizar_ventas.invoke({"agrupar_por": "sede"})
+        ventas_producto = analizar_ventas.invoke({"agrupar_por": "producto"})
+        ventas_mes = analizar_ventas.invoke({"agrupar_por": "mes"})
+        ventas_ctx = (
+            f"{ventas_region}\n\n{ventas_producto}\n\n{ventas_mes}"
+        )
+    except Exception as e:
+        ventas_ctx = f"(no se pudo consultar ventas: {e})"
+
+    investigacion = limpiar_pensamiento(crear_llm(temperature=0.3).invoke([
+        SystemMessage(content=(
+            "Eres un investigador de Industria de Alimentos el Maná.\n"
+            "Con base en el contexto proporcionado, extrae los datos relevantes "
+            "a la pregunta del usuario. NO inventes cifras: si el dato no está "
+            "en el contexto, dilo. Responde en español, en lista de puntos clave."
+        )),
+        HumanMessage(content=(
+            f"Pregunta: {pregunta}\n\n"
+            f"--- Documentos internos ---\n{docs_ctx}\n\n"
+            f"--- Ventas por sede ---\n{ventas_region}\n\n"
+            f"--- Ventas por producto ---\n{ventas_producto}\n\n"
+            f"--- Ventas por mes ---\n{ventas_mes}"
+        )),
+    ]).content)
 
     print("  📊 [ANALISTA] Analizando información...")
     analisis = limpiar_pensamiento(crear_llm(temperature=0.4).invoke([
-        SystemMessage(content="""Eres un analista crítico de Industria de
-Alimentos el Maná. Extrae lo más importante, identifica riesgos u
-oportunidades, y prioriza los hallazgos. Responde en español, estructurado."""),
-        HumanMessage(content=f"Pregunta: {estado['entrada_usuario']}\n\n"
-                              f"Información recopilada:\n{investigacion}\n\nAnaliza y concluye."),
+        SystemMessage(content=(
+            "Eres un analista crítico de Industria de Alimentos el Maná. "
+            "Extrae lo más importante, identifica riesgos u oportunidades, "
+            "y prioriza los hallazgos. Responde en español, estructurado."
+        )),
+        HumanMessage(content=(
+            f"Pregunta: {pregunta}\n\n"
+            f"Información recopilada:\n{investigacion}\n\nAnaliza y concluye."
+        )),
     ]).content)
 
     print("  ✍️  [REDACTOR] Redactando respuesta final...")
     redaccion = limpiar_pensamiento(crear_llm(temperature=0.5).invoke([
-        SystemMessage(content=f"""Eres {NOMBRE_AGENTE}. Toma el análisis
-recibido y conviértelo en una respuesta final clara y bien organizada
-para el usuario. Responde en español."""),
-        HumanMessage(content=f"Pregunta original: {estado['entrada_usuario']}\n\n"
-                              f"Análisis:\n{analisis}\n\nRedacta la respuesta final."),
+        SystemMessage(content=(
+            f"Eres {NOMBRE_AGENTE}. Toma el análisis recibido y conviértelo "
+            "en una respuesta final clara y bien organizada para el usuario. "
+            "Responde en español."
+        )),
+        HumanMessage(content=(
+            f"Pregunta original: {pregunta}\n\n"
+            f"Análisis:\n{analisis}\n\nRedacta la respuesta final."
+        )),
     ]).content)
 
     return {"respuesta_final": redaccion}
@@ -194,7 +233,7 @@ para el usuario. Responde en español."""),
 def nodo_reporte(estado: EstadoAgente) -> dict:
     modelo_estructurado = os.getenv("GROQ_MODEL_ESTRUCTURADO", "openai/gpt-oss-120b")
     llm_estructurado = crear_llm(temperature=0.4, modelo=modelo_estructurado).with_structured_output(ReporteEjecutivo)
-    datos_ventas = analizar_ventas.invoke({"agrupar_por": "region"})
+    datos_ventas = analizar_ventas.invoke({"agrupar_por": "sede"})
 
     prompt = ChatPromptTemplate.from_messages([
         ("system", """Genera un reporte ejecutivo de Industria de Alimentos

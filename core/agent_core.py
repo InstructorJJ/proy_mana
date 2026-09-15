@@ -68,6 +68,24 @@ class AgentService:
         try:
             resultado = self._grafo.invoke(estado_inicial)
         except Exception as e:
+            msg = str(e)
+            # Groq: tool_use_failed / did not call a tool → fallback a RAG
+            if "tool_use_failed" in msg or "did not call a tool" in msg:
+                print(f"  ⚠️  [AGENTE] tool_use_failed detectado, usando fallback RAG")
+                try:
+                    from core.rag import obtener_motor
+                    motor = obtener_motor()
+                    contexto, fuentes = motor.buscar(mensaje)
+                    respuesta = contexto or "No se encontró información relevante."
+                    historial.add_user_message(mensaje)
+                    historial.add_ai_message(respuesta)
+                    return {
+                        "respuesta": respuesta,
+                        "categoria": "documentos",
+                        "fuentes": fuentes,
+                    }
+                except Exception as e2:
+                    raise RuntimeError(f"Error en el agente: {e} | fallback: {e2}")
             raise RuntimeError(f"Error en el agente: {e}")
 
         respuesta = resultado["respuesta_final"]
